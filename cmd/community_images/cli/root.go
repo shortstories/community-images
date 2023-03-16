@@ -21,14 +21,13 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/kubernetes-sigs/community-images/pkg/community_images"
 	"github.com/kubernetes-sigs/community-images/pkg/logger"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	spin "github.com/tj/go-spin"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 )
 
 var (
@@ -50,24 +49,24 @@ func RootCmd() *cobra.Command {
 			log := logger.NewLogger()
 			log.Info("")
 
-			s := spin.New()
+			//s := spin.New()
 			finishedCh := make(chan bool, 1)
 			foundImageName := make(chan string, 1)
 			go func() {
-				lastImageName := ""
+				//lastImageName := ""
 				for {
 					select {
 					case <-finishedCh:
 						fmt.Printf("\r")
 						return
-					case i := <-foundImageName:
-						lastImageName = i
-					case <-time.After(time.Millisecond * 100):
-						if lastImageName == "" {
-							fmt.Printf("\r  \033[36mSearching for images\033[m %s", s.Next())
-						} else {
-							fmt.Printf("\r  \033[36mSearching for images\033[m %s (%s)", s.Next(), lastImageName)
-						}
+					case <-foundImageName:
+						//lastImageName = i
+						//case <-time.After(time.Millisecond * 100):
+						//	if lastImageName == "" {
+						//		fmt.Printf("\r  \033[36mSearching for images\033[m %s", s.Next())
+						//	} else {
+						//		fmt.Printf("\r  \033[36mSearching for images\033[m %s (%s)", s.Next(), lastImageName)
+						//	}
 					}
 				}
 			}()
@@ -75,26 +74,46 @@ func RootCmd() *cobra.Command {
 				finishedCh <- true
 			}()
 
-			imagesList, err := community_images.ListImages(KubernetesConfigFlags, foundImageName, v.GetStringSlice("ignore-ns"))
-			if err != nil {
-				log.Error(err)
-				log.Info("")
-				os.Exit(1)
-				return nil
+			contexts := v.GetStringSlice("contexts")
+			if len(contexts) <= 0 {
+				cfg, _ := KubernetesConfigFlags.ToRawKubeConfigLoader().RawConfig()
+				contexts = []string{cfg.CurrentContext}
 			}
-			finishedCh <- true
 
-			config, _ := KubernetesConfigFlags.ToRESTConfig()
-			log.Header(headerLine(config.Host))
-			re := regexp.MustCompile(`^k8s\.gcr\.io/|^gcr\.io/google-containers`)
-			for _, runningImage := range imagesList {
-				image := imageWithTag(runningImage)
-				log.StartImageLine(image)
-				if re.MatchString(image) {
-					log.ImageRedLine(image)
-				} else {
-					log.ImageGreenLine(image)
+			ns := "kube-system"
+			for i := range contexts {
+				KubernetesConfigFlags = genericclioptions.NewConfigFlags(false)
+				KubernetesConfigFlags.Namespace = &ns
+				KubernetesConfigFlags.ClusterName = &contexts[i]
+				KubernetesConfigFlags.AuthInfoName = &contexts[i]
+
+				config, _ := KubernetesConfigFlags.ToRESTConfig()
+				log.Header(headerLine(contexts[i], config.Host))
+
+				imagesList, err := community_images.ListImages(KubernetesConfigFlags, foundImageName, v.GetStringSlice("ignore-ns"))
+				if err != nil {
+					log.Error(err)
+					log.Info("")
+					os.Exit(1)
+					return nil
 				}
+				//finishedCh <- true
+
+				re := regexp.MustCompile(`^k8s\.gcr\.io/|^gcr\.io/google-containers`)
+				for _, runningImage := range imagesList {
+					image := imageWithTag(runningImage)
+					if re.MatchString(image) {
+						log.StartImageLine(image)
+						log.ImageRedLine(image)
+					} else {
+						if !v.GetBool("only-red-line") {
+							log.StartImageLine(image)
+							log.ImageGreenLine(image)
+						}
+					}
+				}
+
+				log.Info("")
 			}
 
 			fmt.Printf("\nImages in \033[91mred ❌ \033[mare being pulled from \033[1m*outdated*\033[0m Kubernetes community registries.\n" +
@@ -122,6 +141,9 @@ func RootCmd() *cobra.Command {
 	KubernetesConfigFlags.AddFlags(cmd.Flags())
 
 	cmd.Flags().StringSlice("ignore-ns", []string{}, "optional list of namespaces to exclude from searching")
+	cmd.Flags().Bool("only-red-line", false, "print only red lines")
+	cmd.Flags().StringSlice("contexts", []string{}, "optional list of contexts to searching")
+
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	return cmd
 }
